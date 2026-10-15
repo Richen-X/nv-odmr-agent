@@ -84,9 +84,38 @@ def write_role_config(run_dir: Path, role: str) -> tuple[Path, Path]:
     return mcp_path, settings_path
 
 
+def check_launcher(claude_cmd: list[str]) -> None:
+    """Refuse Windows batch launchers: cmd.exe re-parses (and truncates) the command line."""
+    if Path(claude_cmd[0]).suffix.lower() in (".cmd", ".bat"):
+        raise ValueError(
+            f"{claude_cmd[0]} is a Windows .cmd/.bat launcher, which cmd.exe re-parses; it can silently drop the "
+            "isolation flags. Use the native Claude Code installer (claude.exe) or pass the executable directly."
+        )
+
+
+def _run_process(cmd, prompt, env, cwd, timeout_s):
+    """Run a command; on timeout kill its whole process tree (the agent and its MCP server)."""
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        env=env, cwd=cwd, start_new_session=os.name != "nt",
+    )
+    try:
+        out, err = proc.communicate(prompt, timeout=timeout_s)
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(proc.pid, 9)
+        out, err = proc.communicate()
+        return proc.returncode, out, err, True
+
+
 def run_role(role: str, prompt: str, run_dir: Path, cfg: AgentConfig, tag: str) -> dict:
     """One headless agent invocation; returns the parsed `claude -p --output-format json` result."""
     mcp_path, settings_path = write_role_config(run_dir, role)
+    system_path = run_dir / "config" / f"{role}.system.md"
+    system_path.write_text(_role_text(f"{role}.md"), encoding="utf-8")
     schema = json.loads(_role_text("schemas.json"))[role]
     allowed = ",".join(f"mcp__nvlab__{fn.__name__}" for fn in ROLE_TOOLS[role])
     cmd = cfg.claude_cmd + [
@@ -94,7 +123,7 @@ def run_role(role: str, prompt: str, run_dir: Path, cfg: AgentConfig, tag: str) 
         "--output-format", "json",
         "--model", cfg.model,
         "--effort", cfg.effort,
-        "--system-prompt", _role_text(f"{role}.md"),
+        "--system-prompt-file", str(system_path),
         "--json-schema", json.dumps(schema),
         "--mcp-config", str(mcp_path),
         "--strict-mcp-config",
@@ -111,32 +140,37 @@ def run_role(role: str, prompt: str, run_dir: Path, cfg: AgentConfig, tag: str) 
     state = RunState(run_dir)
     state.audit("agent_start", role=role, tag=tag, model=cfg.model)
     t0 = time.time()
-    proc = subprocess.run(
-        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", env=env, cwd=run_dir, timeout=cfg.timeout_s
-    )
     agents_dir = run_dir / "agents"
     agents_dir.mkdir(exist_ok=True)
     (agents_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
-    (agents_dir / f"{tag}.stdout.json").write_text(proc.stdout, encoding="utf-8")
-    if proc.stderr.strip():
-        (agents_dir / f"{tag}.stderr.txt").write_text(proc.stderr, encoding="utf-8")
     try:
-        result = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        result = {"is_error": True, "result": proc.stdout[-2000:] or proc.stderr[-2000:]}
-    output = result.get("structured_output")
-    if output is None and isinstance(result.get("result"), str):
+        code, stdout, stderr, timed_out = _run_process(cmd, prompt, env, run_dir, cfg.timeout_s)
+    except OSError as exc:  # e.g. the claude executable is missing
+        code, stdout, stderr, timed_out = None, "", f"could not start {cmd[0]}: {exc}", False
+    (agents_dir / f"{tag}.stdout.json").write_text(stdout or "", encoding="utf-8")
+    if (stderr or "").strip():
+        (agents_dir / f"{tag}.stderr.txt").write_text(stderr, encoding="utf-8")
+    try:
+        result = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        result = {"is_error": True, "result": (stdout or "")[-2000:] or (stderr or "")[-2000:]}
+    output = None if timed_out else result.get("structured_output")
+    if output is None and not timed_out and isinstance(result.get("result"), str):
         output = _json_in_text(result["result"])
+    if timed_out:
+        error = f"timed out after {cfg.timeout_s:g} s"
+    else:
+        error = None if output is not None else (result.get("result") or (stderr or "")[-2000:])
     summary = {
         "role": role,
         "tag": tag,
-        "ok": proc.returncode == 0 and not result.get("is_error") and output is not None,
-        "exit_code": proc.returncode,
+        "ok": code == 0 and not timed_out and not result.get("is_error") and output is not None,
+        "exit_code": code,
         "output": output,
         "cost_usd": result.get("total_cost_usd"),
         "turns": result.get("num_turns"),
         "seconds": round(time.time() - t0, 1),
-        "error": None if output is not None else (result.get("result") or proc.stderr[-2000:]),
+        "error": error,
     }
     state.audit("agent_end", **{k: v for k, v in summary.items() if k != "output"})
     return summary
@@ -193,7 +227,8 @@ def score(state: RunState, field_fit_id: str | None) -> dict:
             record = state.fit(field_fit_id)
         except KeyError:
             record = None
-    record = record or state.latest_fit("field")
+    if record is None or record.get("kind") != "field":  # e.g. the analyst named its ODMR fit
+        record = state.latest_fit("field")
     if record is None:
         return {"scored": False, "reason": "no field fit"}
     field = record["field"]
@@ -228,28 +263,32 @@ def run_experiment(
     window_mhz: tuple[float, float] = (2640.0, 3100.0),
     goal: str | None = None,
 ) -> dict:
+    check_launcher(cfg.claude_cmd)
     sample = Sample.random(seed, window=window_mhz)
     run_dir = (runs_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-seed{seed}").resolve()
     goal = goal or DEFAULT_GOAL.format(lo=window_mhz[0], hi=window_mhz[1])
     state = RunState.create(run_dir, sample, goal=goal, budget_points=budget_points, window_mhz=window_mhz)
-    history, review, analyst_output = [], None, None
-    for rnd in range(1, max_rounds + 1):
-        planner = run_role("planner", _planner_prompt(goal, state, rnd, max_rounds, review), run_dir, cfg, f"r{rnd}-planner")
-        history.append(planner)
-        if not planner["ok"]:
-            break
-        analyst = run_role("analyst", _analyst_prompt(goal, rnd, planner["output"], review), run_dir, cfg, f"r{rnd}-analyst")
-        history.append(analyst)
-        if not analyst["ok"]:
-            break
-        analyst_output = analyst["output"]
-        reviewer = run_role("reviewer", _reviewer_prompt(goal, rnd, max_rounds, analyst_output), run_dir, cfg, f"r{rnd}-reviewer")
-        history.append(reviewer)
-        if not reviewer["ok"]:
-            break
-        review = reviewer["output"]
-        if review.get("verdict") == "accept":
-            break
+    history, review, analyst_output, error = [], None, None, None
+    try:
+        for rnd in range(1, max_rounds + 1):
+            planner = run_role("planner", _planner_prompt(goal, state, rnd, max_rounds, review), run_dir, cfg, f"r{rnd}-planner")
+            history.append(planner)
+            if not planner["ok"]:
+                break
+            analyst = run_role("analyst", _analyst_prompt(goal, rnd, planner["output"], review), run_dir, cfg, f"r{rnd}-analyst")
+            history.append(analyst)
+            if not analyst["ok"]:
+                break
+            analyst_output = analyst["output"]
+            reviewer = run_role("reviewer", _reviewer_prompt(goal, rnd, max_rounds, analyst_output), run_dir, cfg, f"r{rnd}-reviewer")
+            history.append(reviewer)
+            if not reviewer["ok"]:
+                break
+            review = reviewer["output"]
+            if review.get("verdict") == "accept":
+                break
+    except Exception as exc:  # keep the record of a run that was paid for
+        error = repr(exc)
     report = {
         "seed": seed,
         "run_dir": str(run_dir),
@@ -258,6 +297,8 @@ def run_experiment(
         "accepted": bool(review and review.get("verdict") == "accept"),
         "final_answer": analyst_output,
         "final_review": review,
+        "quality_gate": state.gate_status(),  # as recorded by the Stop hook, not self-reported
+        "error": error,
         "score": score(state, (analyst_output or {}).get("field_fit_id")),
         "agents": [{k: v for k, v in h.items() if k != "output"} for h in history],
         "total_cost_usd": round(sum(h["cost_usd"] or 0.0 for h in history), 4),
@@ -265,6 +306,8 @@ def run_experiment(
     }
     (run_dir / "report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     (run_dir / "report.md").write_text(render_report(report), encoding="utf-8")
+    if error:
+        raise RuntimeError(f"run aborted ({error}); partial report in {run_dir}")
     return report
 
 
@@ -273,6 +316,11 @@ def render_report(report: dict) -> str:
     lines = [f"# Run seed {report['seed']} ({report['model']})", ""]
     lines.append(f"- accepted by reviewer: {report['accepted']} after {report['rounds']} round(s)")
     lines.append(f"- agent invocations: {len(report['agents'])}, cost ${report['total_cost_usd']:.2f}, wall time {report['total_seconds']:.0f} s")
+    gate = report.get("quality_gate")
+    lines.append(f"- quality gate (Stop hook): {'not run' if gate is None else ('passed' if gate['passed'] else 'failed: ' + ' '.join(gate['issues']))}")
+    failed = [a for a in report["agents"] if not a["ok"]]
+    if failed:
+        lines.append(f"- failed agent call: {failed[0]['tag']}: {str(failed[0]['error'])[:300]}")
     if s.get("scored"):
         lines += [
             f"- points measured: {s['points_used']}",
@@ -299,10 +347,13 @@ def main(argv=None) -> None:
     run.add_argument("--max-rounds", type=int, default=3)
     run.add_argument("--budget", type=int, default=1200, help="total measured points allowed")
     run.add_argument("--max-budget-usd", type=float, default=2.0, help="spend cap per agent invocation")
+    run.add_argument("--timeout", type=float, default=1800.0, help="seconds before an agent invocation is killed")
     run.add_argument("--runs-dir", type=Path, default=Path("runs"))
     run.add_argument("--claude", default=shutil.which("claude") or "claude", help="claude executable (or a test double)")
     args = parser.parse_args(argv)
-    cfg = AgentConfig(claude_cmd=args.claude.split("|"), model=args.model, effort=args.effort, max_budget_usd=args.max_budget_usd)
+    cfg = AgentConfig(
+        claude_cmd=args.claude.split("|"), model=args.model, effort=args.effort, max_budget_usd=args.max_budget_usd, timeout_s=args.timeout
+    )
     report = run_experiment(args.seed, cfg, args.runs_dir, args.max_rounds, args.budget)
     print(render_report(report))
     print(f"run directory: {report['run_dir']}")

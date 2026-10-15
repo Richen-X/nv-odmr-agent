@@ -35,6 +35,21 @@ def test_degenerate_orientations_still_determine_field():
     assert fit.b_canonical == pytest.approx([30.0, 30.0, 10.0], abs=0.01)
 
 
+def test_a_line_that_was_never_measured_is_left_unmatched_and_predicted():
+    # Refinement only covers windows around the lines it found; a line outside them must
+    # not drag the fit, and the fit must say where the missing line should be.
+    truth = np.array([41.0, 18.0, 7.0])
+    lines = np.sort(electron_lines(truth).ravel())
+    rng = np.random.default_rng(1)
+    for drop in range(1, 7):
+        kept = np.delete(lines, drop) + rng.normal(0, 0.03, 7)
+        windows = [(c - 8.0, c + 8.0) for c in kept]
+        fit = fit_field(kept, errors=np.full(7, 0.05), coverage=windows)
+        assert fit.consistent
+        assert np.linalg.norm(np.array(fit.b_canonical) - truth) < 0.1
+        assert fit.unmatched_predicted == pytest.approx([lines[drop]], abs=0.2)
+
+
 def test_line_inconsistent_with_any_single_field_is_flagged():
     lines = electron_lines((20.0, -35.0, 12.0)).ravel()
     lines[3] += 3.0

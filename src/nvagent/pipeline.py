@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .fieldfit import FieldFit, fit_field
+from .fieldfit import FieldFit, coverage_intervals, fit_field
 from .fitting import LineCandidate, OdmrFit, find_lines, fit_odmr
 
 STRONG_Z = 6.0  # blind-detection threshold over a wide band
@@ -18,6 +18,15 @@ class OdmrAnalysis:
     fit: OdmrFit
     field: FieldFit | None
     notes: list[str] = field(default_factory=list)
+
+
+def survey_candidates(freqs, counts, dwell_ms, z_min: float = STRONG_Z) -> list[LineCandidate]:
+    """Line candidates in a coarse, power-broadened survey.
+
+    Keeps every candidate (a spurious refinement window costs a few points, a missed line
+    costs the measurement); broad candidates closer than about 1.2 hf + w/4 merge.
+    """
+    return find_lines(freqs, counts, dwell_ms, z_min=z_min, merge_width_factor=0.25, max_lines=32)
 
 
 def select_candidates(
@@ -145,10 +154,9 @@ def analyze_odmr(
     result = hyperfine_alias_check(result, fit, notes)
     field_fit = None
     if with_field and len(result.lines) >= 3:
-        f = np.asarray(freqs, dtype=float)
         field_fit = fit_field(
             [ln.center for ln in result.lines],
             [ln.center_err if ln.center_err else 0.5 for ln in result.lines],
-            window=(float(f.min()), float(f.max())),
+            coverage=coverage_intervals(freqs),
         )
     return OdmrAnalysis(chosen, result, field_fit, notes)

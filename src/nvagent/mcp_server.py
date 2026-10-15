@@ -10,10 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 
-try:  # mcp >= 2
-    from mcp.server.mcpserver import MCPServer
-except ImportError:  # mcp 1.x
-    from mcp.server.fastmcp import FastMCP as MCPServer
+from mcp.server.mcpserver import MCPServer
 
 from . import tools
 

@@ -69,3 +69,9 @@ def test_stop_gate_gives_up_after_max_blocks_and_records_the_failure(run_state):
     assert outputs[3].strip() == ""
     gate = json.loads((run_state.dir / "state" / "quality_gate.json").read_text())
     assert gate["passed"] is False
+
+
+def test_guard_blocks_when_checking_itself_fails(run_state):
+    # A denormal step overflows the point count; the hook must still refuse (exit 2).
+    p = run_hook(GUARD, pre_tool("measure_odmr_sweep", start_mhz=2640, stop_mhz=3100, step_mhz=5e-324, mw_power_dbm=0), run_state.dir)
+    assert p.returncode == 2

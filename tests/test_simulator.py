@@ -18,7 +18,9 @@ def single_line_sample(**kw):
 def test_cw_line_depth_and_width_follow_saturation_model():
     setup = VirtualNVSetup(single_line_sample())
     # 0 dBm -> Rabi 1.0 MHz * sqrt(b_perp^2 = 2/3) = 0.8165 MHz; s = (0.8165/0.4)^2 = 4.1667.
-    depth = 0.25 * 0.15 * (4.1667 / 5.1667)  # quarter of NVs per orientation, saturated fraction
+    # A quarter of the NVs per orientation; CW driving at most equalises the two populations,
+    # so the saturated depth is half the pi-pulse contrast.
+    depth = 0.25 * 0.15 * 0.5 * (4.1667 / 5.1667)
     fwhm = 0.9 * math.sqrt(5.1667)  # power broadening
     sig = setup.odmr_signal(np.array([F_LOW_111, F_LOW_111 + fwhm / 2, 2650.0]), mw_power_dbm=0.0, laser_mw=0.0)
     assert sig[0] == pytest.approx(1 - depth, abs=2e-4)
@@ -30,9 +32,9 @@ def test_counts_are_poisson_with_mean_set_by_laser_saturation():
     setup = VirtualNVSetup(single_line_sample())
     rng = np.random.default_rng(0)
     counts = setup.measure_odmr(np.full(4000, 2650.0), mw_power_dbm=-10, laser_mw=2.0, dwell_ms=1.0, rng=rng)
-    # laser at saturation power -> rate = 2e7 * 1/2 = 1e7 counts/s -> 1e4 counts per 1 ms point.
-    assert counts.mean() == pytest.approx(1e4, rel=0.005)
-    assert counts.var() == pytest.approx(1e4, rel=0.1)
+    # laser at saturation power -> rate = 8e7 * 1/2 = 4e7 counts/s -> 4e4 counts per 1 ms point.
+    assert counts.mean() == pytest.approx(4e4, rel=0.005)
+    assert counts.var() == pytest.approx(4e4, rel=0.1)
 
 
 def test_same_rng_state_reproduces_measurement():

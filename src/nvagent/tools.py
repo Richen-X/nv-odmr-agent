@@ -11,24 +11,20 @@ import os
 import numpy as np
 
 from .adaptive import refine_odmr
-from .fieldfit import fit_field
+from .fieldfit import coverage_intervals, fit_field
 from .fitting import OdmrFit, TraceFit, estimate_baseline, find_lines
 from .fitting import fit_decay as _fit_decay
 from .fitting import fit_odmr as _fit_odmr
 from .fitting import fit_rabi as _fit_rabi
-from .pipeline import analyze_odmr
+from .pipeline import analyze_odmr, survey_candidates
 from .plotting import plot_odmr_fit, plot_trace_fit
 from .qualitygate import gate_issues
 from .runstate import RunState
 from .safety import TOOL_DEFAULTS, check_request, planned_points
 from .simulator import VirtualNVSetup
 
-try:  # mcp >= 2
-    from mcp.server.mcpserver import Image
-    from mcp.server.mcpserver.exceptions import ToolError
-except ImportError:  # mcp 1.x
-    from mcp.server.fastmcp import Image
-    from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Image
+from mcp.server.mcpserver.exceptions import ToolError
 
 STATE: RunState | None = None
 WIDE_SWEEP_MHZ = 100.0  # a sweep this wide has enough off-resonant points to set the baseline
@@ -189,6 +185,8 @@ def _field_summary(field: dict) -> dict:
         "consistent_with_one_field": field["consistent"],
         "message": field["message"],
         "predicted_lines_mhz": [_r(p) for p in field["predicted_lines"]],
+        "predicted_but_not_fitted_mhz": [_r(p) for p in field["unmatched_predicted"]],
+        "of_which_inside_measured_data_mhz": [_r(p) for p in field["unmatched_in_coverage"]],
         "note": "B is in the crystal frame, canonical up to the 48 cubic symmetry operations (|Bx| >= |By| >= |Bz| >= 0).",
     }
 
@@ -333,7 +331,10 @@ def find_odmr_lines(dataset_ids: list[str] | None = None, z_min: float = 6.0) ->
     wide band and ~4 inside windows that a survey already located."""
     chosen, f, counts, dwell = _odmr_datasets(dataset_ids)
     baseline, source = _baseline_for(chosen)
-    cands = find_lines(f, counts, dwell, z_min=z_min, max_lines=16, baseline=baseline, prior_centers=_priors_for(chosen))
+    if baseline is None and all(d["mode"] == "sweep" for d in chosen):
+        cands = survey_candidates(f, counts, dwell, z_min=z_min)  # the settings survey_and_refine uses
+    else:
+        cands = find_lines(f, counts, dwell, z_min=z_min, max_lines=16, baseline=baseline, prior_centers=_priors_for(chosen))
     return {
         "dataset_ids": [d["id"] for d in chosen],
         "n_points": int(len(f)),
@@ -371,6 +372,7 @@ def fit_odmr(
             "selection": {"mw_power_dbm": params["mw_power_dbm"], "laser_power_mw": params["laser_power_mw"]},
             "n_points": int(len(f)),
             "window_mhz": [float(f.min()), float(f.max())],
+            "coverage_mhz": coverage_intervals(f),
             "baseline_from": source,
             "fit": fit.to_dict(),
             "notes": notes,
@@ -385,7 +387,10 @@ def fit_field_vector(odmr_fit_id: str | None = None) -> dict:
     """Invert the line centres of an ODMR fit (default: the latest) into the bias field B and the zero-field
     splitting D, with 1-sigma errors, per-line residuals and whether one field explains every line."""
     st = _state()
-    source = st.fit(odmr_fit_id) if odmr_fit_id else st.latest_fit("odmr")
+    try:
+        source = st.fit(odmr_fit_id) if odmr_fit_id else st.latest_fit("odmr")
+    except KeyError as exc:
+        raise ToolError(f"{exc.args[0]}; run fit_odmr first or pass an existing fit id") from exc
     if source is None or source["kind"] != "odmr":
         raise ToolError("no ODMR fit to invert: run fit_odmr first")
     lines = source["fit"]["lines"]
@@ -393,7 +398,7 @@ def fit_field_vector(odmr_fit_id: str | None = None) -> dict:
         raise ToolError(f"{source['id']} has only {len(lines)} line(s); at least 3 are needed for a field vector")
     try:
         field = fit_field(
-            [ln["center"] for ln in lines], [ln["center_err"] or 0.5 for ln in lines], window=tuple(source["window_mhz"])
+            [ln["center"] for ln in lines], [ln["center_err"] or 0.5 for ln in lines], coverage=source["coverage_mhz"]
         ).to_dict()
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
@@ -406,7 +411,7 @@ def _trace(dataset_id: str, kind: str) -> dict:
     try:
         data = _state().dataset(dataset_id)
     except KeyError as exc:
-        raise ToolError(str(exc)) from exc
+        raise ToolError(str(exc.args[0])) from exc
     if data["kind"] != kind:
         raise ToolError(f"{dataset_id} is a {data['kind']} dataset, not {kind}")
     return data
@@ -415,7 +420,10 @@ def _trace(dataset_id: str, kind: str) -> dict:
 def fit_rabi(dataset_id: str) -> dict:
     """Damped-cosine fit of a Rabi dataset: Rabi frequency, pi-pulse length and contrast."""
     data = _trace(dataset_id, "rabi")
-    fit = _fit_rabi(data["x"], data["counts"], data["dwell_ms"])
+    try:
+        fit = _fit_rabi(data["x"], data["counts"], data["dwell_ms"])
+    except (ValueError, FloatingPointError) as exc:
+        raise ToolError(f"Rabi fit of {dataset_id} failed: {exc}") from exc
     st = _state()
     fit_id = st.save_fit("rabi", {"dataset_id": dataset_id, "fit": fit.to_dict()})
     plot_trace_fit(st.plot_path(fit_id), data["x"], data["counts"], data["dwell_ms"], fit, "MW pulse length (ns)", f"{fit_id}: Rabi")
@@ -425,7 +433,10 @@ def fit_rabi(dataset_id: str) -> dict:
 def fit_decay(dataset_id: str, stretched: bool = True) -> dict:
     """(Stretched-)exponential fit c + A exp(-(t/T)^beta) of a T1 dataset."""
     data = _trace(dataset_id, "t1")
-    fit = _fit_decay(data["x"], data["counts"], data["dwell_ms"], stretched=stretched)
+    try:
+        fit = _fit_decay(data["x"], data["counts"], data["dwell_ms"], stretched=stretched)
+    except (ValueError, FloatingPointError) as exc:
+        raise ToolError(f"decay fit of {dataset_id} failed: {exc}") from exc
     st = _state()
     fit_id = st.save_fit("decay", {"dataset_id": dataset_id, "fit": fit.to_dict()})
     plot_trace_fit(st.plot_path(fit_id), data["x"], data["counts"], data["dwell_ms"], fit, "dark time (us)", f"{fit_id}: T1", logx=True)
@@ -449,7 +460,7 @@ def get_fit_report(fit_id: str) -> dict:
     try:
         record = st.fit(fit_id)
     except KeyError as exc:
-        raise ToolError(str(exc)) from exc
+        raise ToolError(str(exc.args[0])) from exc
     if record["kind"] == "odmr":
         fit = OdmrFit.from_dict(record["fit"])
         return {
@@ -465,25 +476,26 @@ def get_fit_report(fit_id: str) -> dict:
 
 def check_field_consistency(field_fit_id: str | None = None) -> dict:
     """Skeptical checks of a field fit (default: the latest): lines that miss the single-field prediction,
-    predicted lines inside the measured window with no fitted line, plausibility of D and of the hyperfine
-    spacing, and the analyst's quality-gate status."""
+    predicted lines with no fitted line (and whether they fall inside measured data or in unmeasured gaps),
+    plausibility of D and of the hyperfine spacing, and the analyst's quality-gate status."""
     st = _state()
-    record = st.fit(field_fit_id) if field_fit_id else st.latest_fit("field")
+    try:
+        record = st.fit(field_fit_id) if field_fit_id else st.latest_fit("field")
+    except KeyError as exc:
+        raise ToolError(str(exc.args[0])) from exc
     if record is None or record["kind"] != "field":
         raise ToolError("no field fit to check: the analyst must run fit_field_vector first")
     field, source = record["field"], st.fit(record["source_fit"])
-    fitted = np.array(field["centers"])
-    lo, hi = source["window_mhz"]
-    unmatched = [p for p in field["predicted_lines"] if lo <= p <= hi and np.min(np.abs(fitted - p)) > 1.5]
     hf = source["fit"]["hf_split"]
     return {
         "field_fit_id": record["id"],
         "source_fit": source["id"],
-        "n_lines": int(len(fitted)),
+        "n_lines": len(field["centers"]),
         "lines_off_prediction": [
             {"center_mhz": _r(c), "sigma": _r(s, 2)} for c, s in zip(field["centers"], field["norm_residuals"]) if abs(s) > 3
         ],
-        "predicted_but_not_fitted_mhz": [_r(p) for p in unmatched],
+        "predicted_but_not_fitted_mhz": [_r(p) for p in field["unmatched_predicted"]],
+        "of_which_inside_measured_data_mhz": [_r(p) for p in field["unmatched_in_coverage"]],
         "D_mhz": _r(field["D"], 4),
         "D_plausible": 2860.0 <= field["D"] <= 2885.0,
         "hf_split_mhz": _r(hf, 4),

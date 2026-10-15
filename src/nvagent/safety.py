@@ -80,8 +80,8 @@ def check_request(tool: str, args: dict, limits: dict | None = None, points_used
     if tool == "measure_odmr_sweep":
         start, stop, step = number("start_mhz"), number("stop_mhz"), number("step_mhz")
         if None not in (start, stop, step):
-            if step <= 0 or stop < start:
-                problems.append("need step_mhz > 0 and stop_mhz >= start_mhz")
+            if step < 1e-3 or stop < start:
+                problems.append("need step_mhz >= 0.001 and stop_mhz >= start_mhz")
             else:
                 freqs = [start, stop]
     elif tool == "measure_odmr_points":

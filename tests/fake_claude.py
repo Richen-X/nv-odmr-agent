@@ -14,12 +14,19 @@ def arg(name):
 
 def main():
     prompt = sys.stdin.read()
+    if os.environ.get("FAKE_CLAUDE_SLEEP"):
+        import time
+
+        time.sleep(float(os.environ["FAKE_CLAUDE_SLEEP"]))
     server = json.loads(Path(arg("--mcp-config")).read_text())["mcpServers"]["nvlab"]
     role, run_dir = server["env"]["NVAGENT_ROLE"], server["env"]["NVAGENT_RUN_DIR"]
     # The invocation must isolate the agent: no parent session, no built-in tools, only MCP tools.
     assert not os.environ.get("CLAUDECODE"), "child agent inherited the parent Claude Code session"
     assert arg("--tools") == "" and arg("--permission-mode") == "dontAsk" and "--strict-mcp-config" in sys.argv
     assert all(t.startswith("mcp__nvlab__") for t in arg("--allowedTools").split(","))
+    # No argument may contain a newline (Windows launchers re-parse the command line).
+    assert "--system-prompt" not in sys.argv and not any(chr(10) in a for a in sys.argv)
+    assert Path(arg("--system-prompt-file")).read_text().startswith("You are")
     json.loads(arg("--json-schema"))
     hooks = json.loads(Path(arg("--settings")).read_text())["hooks"]
     assert ("Stop" in hooks) == (role == "analyst")

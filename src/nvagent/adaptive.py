@@ -17,7 +17,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 
-from .fitting import _sorted_rates, estimate_baseline, find_lines, robust_baseline
+from .fitting import _sorted_rates, estimate_baseline, robust_baseline
 
 MeasureFn = Callable[[np.ndarray, float], np.ndarray]  # (frequencies, MW power in dBm) -> counts
 
@@ -200,10 +200,9 @@ def survey_and_refine(measure: MeasureFn, f_start: float, f_stop: float, config:
     """Coarse high-power survey, then low-power GP refinement around every detected line."""
     survey_f = np.arange(f_start, f_stop + config.survey_step / 2, config.survey_step)
     survey_c = measure(survey_f, config.survey_power_dbm)
-    # Keep every survey candidate: a spurious window costs a few points, a missed line
-    # costs the measurement. Overlapping windows merge.
-    cands = find_lines(survey_f, survey_c, config.dwell_ms, merge_width_factor=0.25, max_lines=32)
-    centers = sorted(c.center for c in cands)
+    from .pipeline import survey_candidates  # imported here: pipeline is a higher-level module
+
+    centers = sorted(c.center for c in survey_candidates(survey_f, survey_c, config.dwell_ms))
     baseline = estimate_baseline(survey_f, survey_c, config.dwell_ms)
     refine = refine_odmr(
         measure,

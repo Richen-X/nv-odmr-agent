@@ -5,8 +5,8 @@ The model is deliberately physical rather than cosmetic:
 * line positions, strengths and optical contrasts come from diagonalising the NV + 14N
   Hamiltonian for all four orientations (``physics.transitions``);
 * CW ODMR lines saturate and power-broaden with MW Rabi frequency
-  (depth ~ s/(1+s), FWHM ~ sqrt(1+s), s = (Omega/Omega_sat)^2), with optical pumping
-  raising Omega_sat and broadening the intrinsic line;
+  (depth ~ s/(1+s), FWHM ~ sqrt(1+s), s = (Omega/Omega_sat)^2) towards half the pulsed
+  contrast, with optical pumping raising Omega_sat and broadening the intrinsic line;
 * detected counts are Poissonian, with optional multiplicative technical noise and a
   slow baseline slope as seen in real sweeps.
 """
@@ -28,12 +28,12 @@ class Sample:
     D: float = D_GS
     E: float = 0.0
     linewidth: float = 0.9  # MHz, Lorentzian FWHM at low MW and laser power
-    contrast: float = 0.15  # optical contrast of one fully polarised, driven orientation class
+    contrast: float = 0.15  # pulsed contrast of one orientation class after a pi pulse
     mw_dir: tuple[float, float, float] = (0.0, 0.0, 1.0)  # direction of the MW magnetic field
     hyperfine: bool = True
     rabi_ref: float = 1.0  # MHz, Rabi frequency of an ideal line at 0 dBm
     rabi_sat: float = 0.4  # MHz, Rabi frequency that half-saturates CW ODMR without laser
-    count_rate_sat: float = 2.0e7  # counts/s at optical saturation
+    count_rate_sat: float = 8.0e7  # counts/s at optical saturation
     laser_sat_mw: float = 2.0
     rabi_decay_us: float = 2.0
     t1_us: float = 2000.0
@@ -125,7 +125,8 @@ class VirtualNVSetup:
         optical = laser_mw / s.laser_sat_mw
         gamma0 = s.linewidth * (1 + 0.5 * optical / (1 + optical))
         sat = (self._rabi_frequencies(mw_power_dbm) / (s.rabi_sat * np.sqrt(1 + optical))) ** 2
-        depth = 0.25 * s.contrast * t["contrast"] * sat / (1 + sat)
+        # CW driving can at most equalise the two populations: half the pi-pulse contrast.
+        depth = 0.25 * s.contrast * t["contrast"] * 0.5 * sat / (1 + sat)
         half_width = 0.5 * gamma0 * np.sqrt(1 + sat)
         x = (f[None, :] - t["freq"][:, None]) / half_width[:, None]
         dips = (depth[:, None] / (1 + x**2)).sum(axis=0)

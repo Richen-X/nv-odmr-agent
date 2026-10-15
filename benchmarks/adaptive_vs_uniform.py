@@ -6,9 +6,9 @@ dataset goes through the same analysis (``pipeline.analyze_odmr``). We report ho
 recovered line centres and field vector come to the hidden ground truth as a function of
 the number of measured points.
 
-    python benchmarks/adaptive_vs_uniform.py --seeds 0-29 --out benchmarks/results/test.json
+    python benchmarks/adaptive_vs_uniform.py --seeds 0-99
 
-Tuning used seeds 1000+; the reported numbers use seeds 0-29, which were not used for tuning.
+Tuning used seeds 1000-1019; the reported numbers use seeds 0-99, which were not used for tuning.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ SURVEY_STEP, SURVEY_POWER = 3.0, 10.0
 
 def methods() -> list[dict]:
     out = []
-    for power in (-4.0, 0.0, 4.0):  # uniform sweeps get their best fixed power per step
+    for power in (0.0, 4.0, 6.0, 8.0, 10.0):  # uniform sweeps get their best fixed power per step (-4 dBm was never best)
         for step in (0.25, 0.35, 0.5, 0.7, 1.0, 1.4):
             out.append({"method": "uniform", "step": step, "power": power})
     for n in (96, 160, 256, 384, 576, 768):
@@ -41,9 +41,9 @@ def methods() -> list[dict]:
 def run_one(task: tuple[int, dict]) -> dict:
     warnings.simplefilter("ignore")
     from nvagent.adaptive import refine_odmr, windows_around
-    from nvagent.fitting import estimate_baseline, find_lines
+    from nvagent.fitting import estimate_baseline
     from nvagent.physics import canonical_field
-    from nvagent.pipeline import analyze_odmr
+    from nvagent.pipeline import analyze_odmr, survey_candidates
     from nvagent.simulator import Sample, VirtualNVSetup
 
     seed, cfg = task
@@ -60,7 +60,7 @@ def run_one(task: tuple[int, dict]) -> dict:
     else:
         sf = np.arange(F_START, F_STOP + 1e-9, SURVEY_STEP)
         sc = measure(sf, SURVEY_POWER)
-        priors = [x.center for x in find_lines(sf, sc, DWELL_MS, merge_width_factor=0.25, max_lines=32)]
+        priors = [x.center for x in survey_candidates(sf, sc, DWELL_MS)]
         baseline = estimate_baseline(sf, sc, DWELL_MS)
         if not priors:
             return {"seed": seed, **cfg, "n_points": len(sf), "n_lines": 0, "max_line_err": None, "field_err": None}
@@ -123,7 +123,7 @@ def parse_seeds(text: str) -> list[int]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seeds", default="0-29")
+    ap.add_argument("--seeds", default="0-99")
     ap.add_argument("--out", default="benchmarks/results/adaptive_vs_uniform.json")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--only", default=None, help="comma-separated methods to run")

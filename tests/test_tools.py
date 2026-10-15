@@ -24,6 +24,13 @@ def test_server_refuses_out_of_range_requests_even_without_the_hook(run_state):
     assert run_state.points_used() == 0
 
 
+def test_unknown_ids_are_reported_to_the_model(run_state):
+    with pytest.raises(tools.ToolError, match="fit-999"):
+        tools.fit_field_vector("fit-999")
+    with pytest.raises(tools.ToolError, match="ds-999"):
+        tools.fit_rabi("ds-999")
+
+
 def test_repeated_measurements_get_fresh_noise(run_state):
     a = run_state.dataset(tools.measure_odmr_points([2650.0] * 50, -10.0)["dataset_id"])["counts"]
     b = run_state.dataset(tools.measure_odmr_points([2650.0] * 50, -10.0)["dataset_id"])["counts"]

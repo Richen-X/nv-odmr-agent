@@ -168,6 +168,8 @@ def _nnls_lines(f, rate, sigma, base, width, hf_split, regions, z_min, step: flo
     lines jointly, so two triplets about 3 hf apart (whose six components form a near
     regular comb) are not mistaken for one triplet centred between them. Contiguous runs
     of active atoms are one line: centre = amplitude-weighted mean, depth = summed amplitude.
+    The reported z (depth / single-template error) is a ranking heuristic, not a calibrated
+    significance: non-negativity selects atoms and adjacent atoms are summed.
     """
     grid = np.arange(f[0] - 1.0, f[-1] + 1.0, step)
     reach = hf_split + 0.5 * width

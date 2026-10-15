@@ -56,4 +56,10 @@ def gate_issues(state: RunState) -> list[str]:
         issues.append(f"Run fit_field_vector on {record['id']}.")
     elif max(abs(r) for r in field["field"]["norm_residuals"]) > g["field_max_norm_resid"]:
         issues.append("The lines are not explained by one field vector: " + field["field"]["message"] + ".")
+    elif field["field"].get("unmatched_in_coverage"):
+        issues.append(
+            "The field fit predicts line(s) inside the measured data with no fitted line: "
+            + ", ".join(f"{v:.1f}" for v in field["field"]["unmatched_in_coverage"])
+            + " MHz. Fit them (centers_mhz) or explain why they are absent."
+        )
     return issues

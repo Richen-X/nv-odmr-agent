@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .safety import DEFAULT_LIMITS
 from .simulator import Sample
 
 ENV_RUN_DIR = "NVAGENT_RUN_DIR"
+_LOCK = threading.Lock()  # MCP servers may run tool calls in worker threads
 
 
 def _plain(obj):
@@ -30,7 +32,7 @@ def _plain(obj):
 
 def _write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(obj, indent=1, default=_plain), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -102,11 +104,12 @@ class RunState:
         return Sample.from_dict(_read_json(self.dir / ".truth" / "sample.json"))
 
     def _next(self, key: str) -> int:
-        path = self.dir / "state" / "counters.json"
-        counters = _read_json(path) if path.exists() else {}
-        counters[key] = counters.get(key, 0) + 1
-        _write_json(path, counters)
-        return counters[key]
+        with _LOCK:
+            path = self.dir / "state" / "counters.json"
+            counters = _read_json(path) if path.exists() else {}
+            counters[key] = counters.get(key, 0) + 1
+            _write_json(path, counters)
+            return counters[key]
 
     def measurement_rng(self) -> np.random.Generator:
         """Fresh, reproducible noise for every measurement: seeded by (sample seed, index)."""

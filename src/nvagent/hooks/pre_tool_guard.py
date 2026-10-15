@@ -18,6 +18,14 @@ PREFIX = "mcp__nvlab__"
 
 def main(stdin=None) -> int:
     try:
+        return _guard(stdin)
+    except Exception as exc:  # an interlock that cannot decide must refuse
+        print(f"nvagent interlock error ({exc!r}), refusing the instrument call.", file=sys.stderr)
+        return 2
+
+
+def _guard(stdin) -> int:
+    try:
         event = json.loads((stdin or sys.stdin).read())
         name = str(event.get("tool_name", ""))
         args = event.get("tool_input") or {}
