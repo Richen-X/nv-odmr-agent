@@ -66,10 +66,37 @@ decompositions of a close pair can differ by only delta chi-square ~ 3. Lowering
 threshold then moved correct lines onto aliases, so the threshold stays at a statistically
 meaningful delta chi-square > 4 and refinement runs at s ~ 2, where the lines are deeper.
 
+## What an independent code review caught
+
+A separate reviewer agent read the whole tree before publication. Its findings and the fixes:
+
+- **Missed lines broke the field inversion.**
+  - *Finding:* with one of eight lines missing, nearest-neighbour matching required every predicted
+    line inside the data window to have a partner. The fit was dragged to fields several gauss off,
+    and it pointed the reviewer at the wrong frequencies.
+  - *Fix:* the inversion now enumerates order-preserving m-of-8 assignments. It penalises only
+    unmatched predictions that fall inside the data actually measured, and it reports where the
+    missing lines should be.
+- **Windows batch launchers dropped the isolation flags.**
+  - *Finding:* an npm-installed `claude.cmd` runs through cmd.exe, which truncates the command line at
+    the first newline of the multi-line system prompt.
+  - *Fix:* the prompt now goes in through `--system-prompt-file`, and batch launchers are refused.
+- **The first benchmark overstated its precision.**
+  - *Finding:* it had 30 samples, no confidence intervals, and a uniform-sweep power grid capped at
+    +4 dBm, where uniform was still improving.
+  - *Fix:* the grid now extends to the interlock's +10 dBm, the run uses 100 samples, and the summary
+    reports bootstrap intervals and paired tests against the no-GP ablation.
+- **Smaller fixes:**
+  - hung agents now time out without losing the run report;
+  - the hook fails closed on internal errors;
+  - run-state counters are locked;
+  - tool errors carry their reason;
+  - CW saturation reaches half, not all, of the pulsed contrast.
+
 ## Evaluation protocol
 
-Development seeds 1000-1019 for every tuning decision; reported results on seeds 0-29. Uniform
-sweeps get their best fixed MW power per step size. The target accuracy (median field error
+Development seeds 1000-1019 for every tuning decision; reported results on seeds 0-99. Uniform
+sweeps get their best fixed MW power per step size (0 to +10 dBm). The target accuracy (median field error
 <= 40 mG with >= 90 % of runs finding all lines within 0.5 MHz) was fixed before the held-out run.
 The GP's contribution is isolated by an ablation that spends the same refinement budget uniformly
 over the same windows.

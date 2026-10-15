@@ -131,19 +131,101 @@ def table(data: dict) -> str:
     return "\n".join(out)
 
 
+def per_config(rows: list[dict]) -> dict[tuple, dict]:
+    """Per configuration: median point count, field error (mG, inf on failure) and success, by seed."""
+    seeds = sorted({r["seed"] for r in rows})
+    index = {s: i for i, s in enumerate(seeds)}
+    out: dict[tuple, dict] = {}
+    for r in rows:
+        key = (r["method"], r.get("step"), r.get("refine"), r["power"])
+        d = out.setdefault(key, {"points": [], "field": np.full(len(seeds), np.inf), "ok": np.zeros(len(seeds), bool)})
+        i = index[r["seed"]]
+        d["points"].append(r["n_points"])
+        if r["field_err"] is not None:
+            d["field"][i] = 1e3 * r["field_err"]
+        d["ok"][i] = r["max_line_err"] is not None and r["max_line_err"] < 0.5
+    for d in out.values():
+        d["points"] = int(np.median(d["points"]))
+    return out
+
+
+def bootstrap_target(cfgs: dict, n_boot: int = 4000, seed: int = 0) -> dict:
+    """Resample the samples (seeds) and find, per replicate, the cheapest configuration of each
+    method that meets the target; uniform sweeps may pick any step and power in each replicate."""
+    rng = np.random.default_rng(seed)
+    n = len(next(iter(cfgs.values()))["field"])
+    idx = rng.integers(0, n, size=(n_boot, n))
+    cheapest = {}
+    for method in ("gp", "uniform"):
+        best = np.full(n_boot, np.inf)
+        for key, d in cfgs.items():
+            if key[0] == method:
+                hit = (np.median(d["field"][idx], axis=1) <= TARGET_MG) & (d["ok"][idx].mean(axis=1) >= 0.9)
+                best = np.where(hit, np.minimum(best, d["points"]), best)
+        cheapest[method] = best
+    both = np.isfinite(cheapest["gp"]) & np.isfinite(cheapest["uniform"])
+    saving = 1 - cheapest["gp"][both] / cheapest["uniform"][both]
+    return {
+        "saving_median": float(np.median(saving)) if both.any() else None,
+        "saving_ci95": [float(v) for v in np.percentile(saving, [2.5, 97.5])] if both.any() else None,
+    }
+
+
+def median_ci(values: np.ndarray, n_boot: int = 4000, seed: int = 1) -> tuple[float, float]:
+    rng = np.random.default_rng(seed)
+    meds = np.median(values[rng.integers(0, len(values), size=(n_boot, len(values)))], axis=1)
+    return float(np.percentile(meds, 2.5)), float(np.percentile(meds, 97.5))
+
+
+def paired_gp_vs_ablation(cfgs: dict) -> list[dict]:
+    """Same samples, same refinement budget: does the GP beat uniform windows? (Wilcoxon signed-rank)"""
+    from scipy.stats import wilcoxon
+
+    out = []
+    for key, d in cfgs.items():
+        if key[0] != "gp":
+            continue
+        ablation = cfgs[("uniform_windows", None, key[2], key[3])]
+        gp, ab = np.minimum(d["field"], 1e4), np.minimum(ablation["field"], 1e4)  # failures rank last
+        out.append({
+            "points": d["points"], "gp_median_mg": float(np.median(d["field"])), "ablation_median_mg": float(np.median(ablation["field"])),
+            "gp_better_fraction": float(np.mean(gp < ab)), "p_value": float(wilcoxon(gp, ab).pvalue),
+        })
+    return sorted(out, key=lambda r: r["points"])
+
+
 def main() -> None:
     raw = json.loads(RESULTS.read_text())
     data = curves(raw["rows"])
     for theme in THEMES:
         figure(data, theme, ROOT / "docs" / "img" / f"benchmark_{theme}.png")
+    cfgs = per_config(raw["rows"])
     gp_hit, uni_hit = cheapest_meeting_target(data["gp"]), cheapest_meeting_target(data["uniform"])
+    boot = bootstrap_target(cfgs)
     summary = [f"Seeds {raw['seeds']} ({data['gp'][0]['n']} samples per configuration).", ""]
     if gp_hit and uni_hit:
+        ci = boot["saving_ci95"]
         summary.append(
-            f"Target (median |dB| <= {TARGET_MG:.0f} mG with >= 90% success): GP two-stage needs {gp_hit['n_points']} points, "
-            f"the best uniform sweep {uni_hit['n_points']} ({100 * (1 - gp_hit['n_points'] / uni_hit['n_points']):.0f}% fewer)."
+            f"Target (median |dB| <= {TARGET_MG:.0f} mG with >= 90% of runs finding all 8 lines within 0.5 MHz): "
+            f"GP two-stage needs {gp_hit['n_points']} points, the best uniform sweep {uni_hit['n_points']} "
+            f"({100 * (1 - gp_hit['n_points'] / uni_hit['n_points']):.0f}% fewer). Bootstrap over samples: saving "
+            f"{100 * boot['saving_median']:.0f}% (95% CI {100 * ci[0]:.0f}-{100 * ci[1]:.0f}%)."
         )
-    summary += ["", table(data)]
+    summary += ["", "Median field error with bootstrap 95% CI of the median:", ""]
+    summary.append("| method | setting | points | median field error (95% CI) |")
+    summary.append("|---|---|---|---|")
+    for method in ("gp", "uniform_windows", "uniform"):
+        for p in data[method]:
+            key = (method, p["step"], p["refine"], p["power"])
+            lo, hi = median_ci(cfgs[key]["field"])
+            setting = f"{p['refine']} refine pts @ 0 dBm" if p["refine"] else f"{p['step']} MHz step @ {p['power']:+.0f} dBm"
+            summary.append(f"| {LABELS[method]} | {setting} | {p['n_points']} | {p['field_med']:.0f} mG ({lo:.0f}-{hi:.0f}) |")
+    summary += ["", "GP vs. the same budget spread uniformly over the same windows (paired by sample, Wilcoxon signed-rank):", ""]
+    summary.append("| points | GP median | no-GP median | GP better in | p |")
+    summary.append("|---|---|---|---|---|")
+    for r in paired_gp_vs_ablation(cfgs):
+        summary.append(f"| {r['points']} | {r['gp_median_mg']:.0f} mG | {r['ablation_median_mg']:.0f} mG | {100 * r['gp_better_fraction']:.0f}% | {r['p_value']:.3f} |")
+    summary += ["", "All configurations:", "", table(data)]
     (ROOT / "benchmarks" / "results" / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     print("\n".join(summary))
 
