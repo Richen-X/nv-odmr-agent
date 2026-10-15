@@ -1,0 +1,48 @@
+{
+  "planner": {
+    "type": "object",
+    "properties": {
+      "measurements": {"type": "array", "items": {"type": "string"}, "description": "One line per measurement taken this round: tool, dataset id, key settings, points."},
+      "points_used_total": {"type": "integer"},
+      "line_candidates_mhz": {"type": "array", "items": {"type": "number"}},
+      "ready_for_analysis": {"type": "boolean"},
+      "notes_for_analyst": {"type": "string"},
+      "rationale": {"type": "string"}
+    },
+    "required": ["measurements", "points_used_total", "ready_for_analysis", "rationale"]
+  },
+  "analyst": {
+    "type": "object",
+    "properties": {
+      "odmr_fit_id": {"type": "string"},
+      "field_fit_id": {"type": "string"},
+      "lines": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {"center_mhz": {"type": "number"}, "center_err_mhz": {"type": "number"}},
+          "required": ["center_mhz", "center_err_mhz"]
+        }
+      },
+      "b_canonical_g": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+      "b_err_g": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+      "b_magnitude_g": {"type": "number"},
+      "D_mhz": {"type": "number"},
+      "reduced_chi2": {"type": "number"},
+      "quality_gate_passed": {"type": "boolean"},
+      "summary": {"type": "string"}
+    },
+    "required": ["odmr_fit_id", "field_fit_id", "lines", "b_canonical_g", "b_err_g", "b_magnitude_g", "D_mhz", "quality_gate_passed", "summary"]
+  },
+  "reviewer": {
+    "type": "object",
+    "properties": {
+      "verdict": {"type": "string", "enum": ["accept", "revise"]},
+      "issues": {"type": "array", "items": {"type": "string"}},
+      "requests_for_planner": {"type": "array", "items": {"type": "string"}},
+      "requests_for_analyst": {"type": "array", "items": {"type": "string"}},
+      "summary": {"type": "string"}
+    },
+    "required": ["verdict", "issues", "requests_for_planner", "requests_for_analyst", "summary"]
+  }
+}
